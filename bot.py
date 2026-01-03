@@ -2,6 +2,7 @@ import os
 import re
 from datetime import date
 from collections import defaultdict
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -17,27 +18,36 @@ from telegram.ext import (
 from google_sheet_store import append_expense, get_all_rows
 
 # =========================
-# FASTAPI
-# =========================
-fastapi_app = FastAPI()
-
-# =========================
 # CONFIG
 # =========================
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
+    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
 
 OWNER_USERNAME = "ltkngan198"
 
 # =========================
-# CREATE TELEGRAM APP (FIX CHÍNH)
+# TELEGRAM APPLICATION
 # =========================
 application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# 👉 INIT NGAY LẬP TỨC (QUAN TRỌNG)
-import asyncio
-asyncio.get_event_loop().run_until_complete(application.initialize())
+# =========================
+# FASTAPI LIFESPAN (QUAN TRỌNG)
+# =========================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP
+    await application.initialize()
+    await application.start()
+    print("✅ Telegram Application started")
+
+    yield
+
+    # SHUTDOWN
+    await application.stop()
+    print("🛑 Telegram Application stopped")
+
+fastapi_app = FastAPI(lifespan=lifespan)
 
 # =========================
 # KEYBOARD
@@ -52,7 +62,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 # =========================
-# START / HELP
+# COMMANDS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -94,7 +104,7 @@ def parse_amount(text: str) -> int:
     return sign * value
 
 # =========================
-# HANDLE MESSAGE
+# MESSAGE HANDLER
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -141,7 +151,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# YEAR
+# YEAR REPORT
 # =========================
 async def year_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     year = context.args[0]
