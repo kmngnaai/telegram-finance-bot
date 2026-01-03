@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
@@ -46,15 +46,12 @@ fastapi_app = FastAPI(lifespan=lifespan)
 # =========================
 # KEYBOARD
 # =========================
-BTN_IN = "➕ Ghi thu"
-BTN_OUT = "➖ Ghi chi"
 BTN_DAY = "📊 Tổng kết ngày"
 BTN_MONTH = "📅 Tổng kết tháng"
 BTN_YEAR = "📈 Tổng kết năm"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [BTN_IN, BTN_OUT],
         [BTN_DAY, BTN_MONTH],
         [BTN_YEAR, "ℹ️ Help"],
     ],
@@ -62,56 +59,54 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 # =========================
-# STATE (OPTIONAL)
-# =========================
-USER_MODE = {}  # username -> "IN" | "OUT"
-
-# =========================
 # COMMANDS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    USER_MODE.pop(update.message.from_user.username, None)
     await update.message.reply_text("👋 Chào bạn!", reply_markup=MAIN_KEYBOARD)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📘 CÁCH NHẬP\n\n"
-        "20K CF  → Chi\n"
-        "+1M LUONG → Thu\n"
-        "20K CF\\n+1M LUONG → 2 dòng\n\n"
-        "👉 Không cần chọn trước",
+        "20K CF\n"
+        "+1M LUONG\n\n"
+        "20260101 20K CF\n"
+        "20260102 +1M LUONG\n\n"
+        "👉 YYYYMMDD + số tiền",
         reply_markup=MAIN_KEYBOARD,
     )
 
 # =========================
-# MODE BUTTONS (TÙY CHỌN)
+# PARSE LINE (NGÀY + TIỀN)
 # =========================
-async def set_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    USER_MODE[update.message.from_user.username] = "IN"
-    await update.message.reply_text("➕ Mặc định ghi THU")
+def parse_line(line: str):
+    """
+    Trả về (date, amount, category)
+    """
+    parts = line.strip().split()
 
-async def set_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    USER_MODE[update.message.from_user.username] = "OUT"
-    await update.message.reply_text("➖ Mặc định ghi CHI")
+    # Có ngày ở đầu
+    if re.fullmatch(r"\d{8}", parts[0]):
+        tx_date = datetime.strptime(parts[0], "%Y%m%d").date()
+        amount_token = parts[1]
+        category = " ".join(parts[2:]) if len(parts) > 2 else "KHÁC"
+    else:
+        tx_date = date.today()
+        amount_token = parts[0]
+        category = " ".join(parts[1:]) if len(parts) > 1 else "KHÁC"
 
-# =========================
-# PARSE
-# =========================
-def parse_amount(token: str, mode: str | None) -> int:
-    token = token.upper().replace(",", "")
+    token = amount_token.upper().replace(",", "")
 
+    sign = -1
     if token.startswith("+"):
         sign = 1
         token = token[1:]
     elif token.startswith("-"):
         sign = -1
         token = token[1:]
-    else:
-        sign = 1 if mode == "IN" else -1  # mặc định CHI
 
-    m = re.match(r"(\d+)(K|M)?$", token)
+    m = re.fullmatch(r"(\d+)(K|M)?", token)
     if not m:
-        raise ValueError
+        raise ValueError("Sai định dạng tiền")
 
     value = int(m.group(1))
     if m.group(2) == "K":
@@ -119,25 +114,22 @@ def parse_amount(token: str, mode: str | None) -> int:
     elif m.group(2) == "M":
         value *= 1_000_000
 
-    return sign * value
+    return tx_date, sign * value, category
 
 # =========================
 # HANDLE MONEY (MULTI-LINE)
 # =========================
 async def handle_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user.username or "unknown"
-    mode = USER_MODE.get(user)
-
     lines = update.message.text.strip().splitlines()
+
     ok = 0
     bad = []
 
     for line in lines:
         try:
-            parts = line.split(maxsplit=1)
-            amount = parse_amount(parts[0], mode)
-            category = parts[1] if len(parts) > 1 else "KHÁC"
-            append_expense(date.today(), user, amount, category)
+            tx_date, amount, category = parse_line(line)
+            append_expense(tx_date, user, amount, category)
             ok += 1
         except Exception:
             bad.append(line)
@@ -188,6 +180,7 @@ async def report_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def report_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     year = date.today().strftime("%Y")
     rows = get_all_rows()
+
     by_month = defaultdict(lambda: {"in": 0, "out": 0})
 
     for r in rows:
@@ -198,30 +191,42 @@ async def report_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 by_month[m]["out"] += abs(r["amount"])
 
-    text = f"📈 BÁO CÁO NĂM {year}\n\n"
+    total_in = sum(v["in"] for v in by_month.values())
+    total_out = sum(v["out"] for v in by_month.values())
+
+    max_out_month = max(by_month, key=lambda m: by_month[m]["out"], default="--")
+    best_month = max(by_month, key=lambda m: by_month[m]["in"] - by_month[m]["out"], default="--")
+
+    text = f"📈 BÁO CÁO THU–CHI NĂM {year}\n\n"
+    text += f"💰 Tổng thu: {total_in:,}\n"
+    text += f"💸 Tổng chi: {total_out:,}\n"
+    text += f"📌 Còn lại: {total_in-total_out:,}\n\n"
+    text += "📅 CHI TIẾT THEO THÁNG:\n"
+
     for m in sorted(by_month):
         i = by_month[m]["in"]
         o = by_month[m]["out"]
         text += f"• Tháng {m}: Thu {i:,} | Chi {o:,} | Còn {i-o:,}\n"
 
+    text += "\n📌 ĐÁNH GIÁ:\n"
+    text += "⚠️ Chi > Thu cả năm\n" if total_out > total_in else "✅ Thu > Chi cả năm\n"
+    text += f"🔥 Tháng chi nhiều nhất: {max_out_month}\n"
+    text += f"💚 Tháng tiết kiệm tốt nhất: {best_month}"
+
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 # =========================
-# HANDLERS ORDER (RẤT QUAN TRỌNG)
+# HANDLERS
 # =========================
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
-
-application.add_handler(MessageHandler(filters.Regex(f"^{BTN_IN}$"), set_income))
-application.add_handler(MessageHandler(filters.Regex(f"^{BTN_OUT}$"), set_expense))
 
 application.add_handler(MessageHandler(filters.Regex(f"^{BTN_DAY}$"), report_day))
 application.add_handler(MessageHandler(filters.Regex(f"^{BTN_MONTH}$"), report_month))
 application.add_handler(MessageHandler(filters.Regex(f"^{BTN_YEAR}$"), report_year))
 
-# ⚠️ CUỐI CÙNG MỚI BẮT GIAO DỊCH
 application.add_handler(
-    MessageHandler(filters.TEXT & filters.Regex(r"^[+\-]?\d"), handle_money)
+    MessageHandler(filters.TEXT & filters.Regex(r"^\d{8}|\d"), handle_money)
 )
 
 # =========================
