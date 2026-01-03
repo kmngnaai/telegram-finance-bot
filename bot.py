@@ -5,7 +5,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -23,8 +23,6 @@ from google_sheet_store import append_expense, get_all_rows
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
-
-OWNER_USERNAME = "ltkngan198"
 
 # =========================
 # TELEGRAM APP
@@ -51,10 +49,7 @@ BTN_MONTH = "📅 Tổng kết tháng"
 BTN_YEAR = "📈 Tổng kết năm"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [BTN_DAY, BTN_MONTH],
-        [BTN_YEAR, "ℹ️ Help"],
-    ],
+    [[BTN_DAY, BTN_MONTH], [BTN_YEAR, "ℹ️ Help"]],
     resize_keyboard=True,
 )
 
@@ -66,25 +61,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📘 CÁCH NHẬP\n\n"
+        "📘 HƯỚNG DẪN\n\n"
+        "➕ Ghi sổ:\n"
         "20K CF\n"
         "+1M LUONG\n\n"
-        "20260101 20K CF\n"
-        "20260102 +1M LUONG\n\n"
-        "👉 YYYYMMDD + số tiền",
+        "➕ Ghi theo ngày:\n"
+        "20260101 20K CF\n\n"
+        "📊 Báo cáo:\n"
+        "/year 2026\n",
         reply_markup=MAIN_KEYBOARD,
     )
 
 # =========================
-# PARSE LINE (NGÀY + TIỀN)
+# PARSE LINE
 # =========================
 def parse_line(line: str):
-    """
-    Trả về (date, amount, category)
-    """
     parts = line.strip().split()
 
-    # Có ngày ở đầu
     if re.fullmatch(r"\d{8}", parts[0]):
         tx_date = datetime.strptime(parts[0], "%Y%m%d").date()
         amount_token = parts[1]
@@ -106,7 +99,7 @@ def parse_line(line: str):
 
     m = re.fullmatch(r"(\d+)(K|M)?", token)
     if not m:
-        raise ValueError("Sai định dạng tiền")
+        raise ValueError
 
     value = int(m.group(1))
     if m.group(2) == "K":
@@ -123,8 +116,7 @@ async def handle_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user.username or "unknown"
     lines = update.message.text.strip().splitlines()
 
-    ok = 0
-    bad = []
+    ok, bad = 0, []
 
     for line in lines:
         try:
@@ -143,42 +135,12 @@ async def handle_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # REPORTS
 # =========================
-async def report_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = date.today().isoformat()
-    rows = get_all_rows()
-    thu = chi = 0
-
-    for r in rows:
-        if r["date"] == today:
-            if r["amount"] >= 0:
-                thu += r["amount"]
-            else:
-                chi += abs(r["amount"])
-
-    await update.message.reply_text(
-        f"📊 TỔNG KẾT NGÀY\n💰 Thu: {thu:,}\n💸 Chi: {chi:,}\n📌 Còn: {thu-chi:,}",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-async def report_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    key = date.today().strftime("%Y-%m")
-    rows = get_all_rows()
-    thu = chi = 0
-
-    for r in rows:
-        if r["date"].startswith(key):
-            if r["amount"] >= 0:
-                thu += r["amount"]
-            else:
-                chi += abs(r["amount"])
-
-    await update.message.reply_text(
-        f"📅 TỔNG KẾT THÁNG\n💰 Thu: {thu:,}\n💸 Chi: {chi:,}\n📌 Còn: {thu-chi:,}",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
 async def report_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    year = date.today().strftime("%Y")
+    if not context.args:
+        await update.message.reply_text("❗ Ví dụ: /year 2026")
+        return
+
+    year = context.args[0]
     rows = get_all_rows()
 
     by_month = defaultdict(lambda: {"in": 0, "out": 0})
@@ -191,42 +153,31 @@ async def report_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 by_month[m]["out"] += abs(r["amount"])
 
-    total_in = sum(v["in"] for v in by_month.values())
-    total_out = sum(v["out"] for v in by_month.values())
-
-    max_out_month = max(by_month, key=lambda m: by_month[m]["out"], default="--")
-    best_month = max(by_month, key=lambda m: by_month[m]["in"] - by_month[m]["out"], default="--")
-
-    text = f"📈 BÁO CÁO THU–CHI NĂM {year}\n\n"
-    text += f"💰 Tổng thu: {total_in:,}\n"
-    text += f"💸 Tổng chi: {total_out:,}\n"
-    text += f"📌 Còn lại: {total_in-total_out:,}\n\n"
-    text += "📅 CHI TIẾT THEO THÁNG:\n"
-
+    text = f"📈 BÁO CÁO NĂM {year}\n\n"
     for m in sorted(by_month):
         i = by_month[m]["in"]
         o = by_month[m]["out"]
         text += f"• Tháng {m}: Thu {i:,} | Chi {o:,} | Còn {i-o:,}\n"
 
-    text += "\n📌 ĐÁNH GIÁ:\n"
-    text += "⚠️ Chi > Thu cả năm\n" if total_out > total_in else "✅ Thu > Chi cả năm\n"
-    text += f"🔥 Tháng chi nhiều nhất: {max_out_month}\n"
-    text += f"💚 Tháng tiết kiệm tốt nhất: {best_month}"
-
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 # =========================
-# HANDLERS
+# HANDLERS (THỨ TỰ QUYẾT ĐỊNH TẤT CẢ)
 # =========================
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(CommandHandler("year", report_year))
 
-application.add_handler(MessageHandler(filters.Regex(f"^{BTN_DAY}$"), report_day))
-application.add_handler(MessageHandler(filters.Regex(f"^{BTN_MONTH}$"), report_month))
-application.add_handler(MessageHandler(filters.Regex(f"^{BTN_YEAR}$"), report_year))
+application.add_handler(MessageHandler(filters.Regex(f"^{BTN_DAY}$"), lambda u, c: u.message.reply_text("📊 Đang làm")))
+application.add_handler(MessageHandler(filters.Regex(f"^{BTN_MONTH}$"), lambda u, c: u.message.reply_text("📅 Đang làm")))
+application.add_handler(MessageHandler(filters.Regex(f"^{BTN_YEAR}$"), lambda u, c: u.message.reply_text("📈 Gõ /year 2026")))
 
+# ⚠️ CHỈ BẮT DÒNG TIỀN
 application.add_handler(
-    MessageHandler(filters.TEXT & filters.Regex(r"^\d{8}|\d"), handle_money)
+    MessageHandler(
+        filters.TEXT & filters.Regex(r"^(\d{8}\s+)?[+-]?\d"),
+        handle_money,
+    )
 )
 
 # =========================
