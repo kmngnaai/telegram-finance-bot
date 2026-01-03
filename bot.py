@@ -1,10 +1,9 @@
 import os
 import re
-from datetime import datetime, date
+from datetime import date
 from collections import defaultdict
 
 from fastapi import FastAPI, Request
-
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -21,20 +20,32 @@ from telegram.ext import (
 from google_sheet_store import append_expense, get_all_rows
 
 # =========================
-# FASTAPI APP (BẮT BUỘC)
+# FASTAPI APP
 # =========================
 fastapi_app = FastAPI()
 
 # =========================
 # CONFIG
 # =========================
-OWNER_USERNAME = "ltkngan198"  # ❗ đổi thành username Telegram của bạn (KHÔNG có @)
+OWNER_USERNAME = "ltkngan198"  # đổi thành username Telegram của bạn (không có @)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
 
 application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# =========================
+# START / STOP TELEGRAM APP (FIX CHÍNH)
+# =========================
+@fastapi_app.on_event("startup")
+async def on_startup():
+    await application.initialize()
+    await application.start()
+
+@fastapi_app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
 
 # =========================
 # KEYBOARD
@@ -49,7 +60,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 # =========================
-# HELP / START
+# START / HELP
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -59,7 +70,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "📘 HƯỚNG DẪN\n\n"
+        "📘 HƯỚNG DẪN NHANH\n\n"
         "➕ Ghi THU:\n"
         "+5M LUONG\n\n"
         "➖ Ghi CHI:\n"
@@ -82,7 +93,7 @@ def parse_amount(text: str) -> int:
         text = text[1:]
     m = re.match(r"(\d+)(K|M)?", text)
     if not m:
-        raise ValueError("Invalid amount")
+        raise ValueError
     value = int(m.group(1))
     unit = m.group(2)
     if unit == "K":
@@ -92,7 +103,7 @@ def parse_amount(text: str) -> int:
     return sign * value
 
 # =========================
-# MESSAGE HANDLER (GHI THU / CHI)
+# HANDLE MESSAGE (THU / CHI)
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -111,9 +122,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Loại: {category}",
             reply_markup=MAIN_KEYBOARD,
         )
-    except Exception as e:
+    except Exception:
         await update.message.reply_text(
-            f"❌ Lỗi nhập liệu\nVí dụ: 20K CF hoặc +1M LUONG",
+            "❌ Lỗi nhập liệu\nVí dụ: 20K CF hoặc +1M LUONG",
             reply_markup=MAIN_KEYBOARD,
         )
 
@@ -122,7 +133,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Thiếu tham số. Ví dụ: /summary 20260101")
+        await update.message.reply_text("❌ Ví dụ: /summary 20260101")
         return
 
     key = context.args[0]
@@ -137,10 +148,10 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 expense += abs(r["amount"])
 
     await update.message.reply_text(
-        f"📊 Tổng kết\n"
+        f"📊 TỔNG KẾT\n"
         f"💰 Thu: {income:,} đ\n"
         f"💸 Chi: {expense:,} đ\n"
-        f"📌 Còn lại: {income - expense:,} đ",
+        f"📌 Còn: {income - expense:,} đ",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -149,12 +160,11 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def year_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Thiếu năm. Ví dụ: /year 2026")
+        await update.message.reply_text("❌ Ví dụ: /year 2026")
         return
 
     year = context.args[0]
     rows = get_all_rows()
-
     by_month = defaultdict(lambda: {"in": 0, "out": 0})
 
     for r in rows:
@@ -165,8 +175,8 @@ async def year_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 by_month[m]["out"] += abs(r["amount"])
 
-    text = f"📈 BÁO CÁO NĂM {year}\n\n"
     total_in = total_out = 0
+    text = f"📈 BÁO CÁO THU–CHI NĂM {year}\n\n"
 
     for m in sorted(by_month):
         i = by_month[m]["in"]
@@ -194,7 +204,7 @@ application.add_handler(CommandHandler("year", year_report))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # =========================
-# WEBHOOK ENDPOINT (BẮT BUỘC)
+# WEBHOOK ENDPOINT
 # =========================
 @fastapi_app.post("/webhook")
 async def telegram_webhook(request: Request):
