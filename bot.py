@@ -1,8 +1,9 @@
 import os
 import re
 from datetime import datetime, date
-from dotenv import load_dotenv
 from collections import defaultdict
+
+from fastapi import FastAPI, Request
 
 from telegram import (
     Update,
@@ -11,316 +12,193 @@ from telegram import (
 )
 from telegram.ext import (
     ApplicationBuilder,
-    MessageHandler,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
     filters,
 )
 
 from google_sheet_store import append_expense, get_all_rows
 
-# =====================
+# =========================
+# FASTAPI APP (BẮT BUỘC)
+# =========================
+fastapi_app = FastAPI()
+
+# =========================
 # CONFIG
-# =====================
-OWNER_USERNAME = "ltkngan198"  # 🔥 đổi thành username Telegram của bạn (KHÔNG @)
+# =========================
+OWNER_USERNAME = "ltkngan198"  # ❗ đổi thành username Telegram của bạn (KHÔNG có @)
 
-# =====================
-# LOAD ENV
-# =====================
-load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
 
-# =====================
-# MENU
-# =====================
-def main_menu():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("📒 Hướng dẫn")],
-            [KeyboardButton("➕ Ghi thu"), KeyboardButton("➖ Ghi chi")],
-            [KeyboardButton("📊 Tổng kết tháng"), KeyboardButton("📊 Tổng kết ngày")],
-            [KeyboardButton("📊 Báo cáo năm")],
-        ],
-        resize_keyboard=True,
-    )
+application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# =====================
-# PARSE AMOUNT
-# =====================
-def parse_amount(text: str) -> int:
-    text = text.strip().upper()
+# =========================
+# KEYBOARD
+# =========================
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("➕ Ghi thu"), KeyboardButton("➖ Ghi chi")],
+        [KeyboardButton("📊 Tổng kết ngày"), KeyboardButton("📅 Tổng kết tháng")],
+        [KeyboardButton("📈 Tổng kết năm"), KeyboardButton("ℹ️ Help")],
+    ],
+    resize_keyboard=True,
+)
 
-    sign = -1
-    if text.startswith("+"):
-        sign = 1
-        text = text[1:]
-
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)(K|M)?", text)
-    if not match:
-        raise ValueError
-
-    number = float(match.group(1))
-    unit = match.group(2)
-
-    if unit == "K":
-        number *= 1_000
-    elif unit == "M":
-        number *= 1_000_000
-
-    return int(number * sign)
-
-# =====================
-# PARSE DATE
-# =====================
-def parse_date_and_rest(parts):
-    if re.fullmatch(r"\d{8}", parts[0]):
-        d = datetime.strptime(parts[0], "%Y%m%d").date()
-        return d, parts[1:]
-    return date.today(), parts
-
-# =====================
-# /START
-# =====================
+# =========================
+# HELP / START
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Chào bạn!\nChọn chức năng bên dưới 👇",
-        reply_markup=main_menu(),
+        reply_markup=MAIN_KEYBOARD,
     )
 
-# =====================
-# /HELP
-# =====================
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📒 HƯỚNG DẪN\n\n"
-        "➖ Ghi CHI:\n20K CF\n1M ĂN\n\n"
-        "➕ Ghi THU:\n+5M LƯƠNG\n+200K THƯỞNG\n\n"
+    text = (
+        "📘 HƯỚNG DẪN\n\n"
+        "➕ Ghi THU:\n"
+        "+5M LUONG\n\n"
+        "➖ Ghi CHI:\n"
+        "20K CF\n\n"
         "📊 Báo cáo:\n"
-        "/summary 202601\n"
-        "/summary 20260101\n"
-        "/year 2026",
-        reply_markup=main_menu(),
+        "/summary 20260101  (ngày)\n"
+        "/summary 202601    (tháng)\n"
+        "/year 2026         (năm)\n"
     )
+    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
-# =====================
-# /SUMMARY (YYYYMM / YYYYMMDD) – CHỈ CỦA USER
-# =====================
-async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = get_all_rows()
-    caller = update.effective_user.username
+# =========================
+# PARSE AMOUNT
+# =========================
+def parse_amount(text: str) -> int:
+    text = text.upper().replace(",", "").strip()
+    sign = 1
+    if text.startswith("+"):
+        sign = 1
+        text = text[1:]
+    m = re.match(r"(\d+)(K|M)?", text)
+    if not m:
+        raise ValueError("Invalid amount")
+    value = int(m.group(1))
+    unit = m.group(2)
+    if unit == "K":
+        value *= 1_000
+    elif unit == "M":
+        value *= 1_000_000
+    return sign * value
 
-    income = 0
-    expense = 0
-
-    target_year = date.today().year
-    target_month = date.today().month
-    target_day = None
-
-    if context.args:
-        arg = context.args[0]
-        if re.fullmatch(r"\d{8}", arg):
-            target_day = datetime.strptime(arg, "%Y%m%d").date()
-            target_year = target_day.year
-            target_month = target_day.month
-        elif re.fullmatch(r"\d{6}", arg):
-            target_year = int(arg[:4])
-            target_month = int(arg[4:6])
-        else:
-            await update.message.reply_text("❌ Dùng /summary 202601 hoặc /summary 20260101")
-            return
-
-    for r in rows:
-        if r.get("user") != caller:
-            continue
-
-        d = datetime.strptime(r["date"], "%Y-%m-%d").date()
-        amount = int(r["amount"])
-
-        if target_day:
-            if d != target_day:
-                continue
-        else:
-            if d.year != target_year or d.month != target_month:
-                continue
-
-        if amount > 0:
-            income += amount
-        else:
-            expense += abs(amount)
-
-    if income == 0 and expense == 0:
-        await update.message.reply_text("❗ Không có dữ liệu")
-        return
-
-    title = (
-        f"📊 Tổng kết ngày {target_day.strftime('%d/%m/%Y')}"
-        if target_day
-        else f"📊 Tổng kết tháng {target_month:02d}/{target_year}"
-    )
-
-    await update.message.reply_text(
-        f"{title}\n\n"
-        f"💰 Thu: {income:,} đ\n"
-        f"💸 Chi: {expense:,} đ\n"
-        f"🧮 Còn lại: {income - expense:,} đ"
-    )
-
-# =====================
-# /YEAR YYYY [@user]
-# =====================
-async def year_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or not re.fullmatch(r"\d{4}", context.args[0]):
-        await update.message.reply_text("Dùng: /year 2026 [@username]")
-        return
-
-    year = int(context.args[0])
-    caller = update.effective_user.username
-    target_user = caller
-
-    # OWNER xem user khác
-    if len(context.args) >= 2:
-        if caller != OWNER_USERNAME:
-            await update.message.reply_text("⛔ Bạn không có quyền xem user khác")
-            return
-        target_user = context.args[1].lstrip("@")
-
-    rows = get_all_rows()
-    months = defaultdict(lambda: {"income": 0, "expense": 0})
-
-    total_income = 0
-    total_expense = 0
-
-    for r in rows:
-        if r.get("user") != target_user:
-            continue
-
-        d = datetime.strptime(r["date"], "%Y-%m-%d").date()
-        if d.year != year:
-            continue
-
-        amount = int(r["amount"])
-
-        if amount > 0:
-            months[d.month]["income"] += amount
-            total_income += amount
-        else:
-            months[d.month]["expense"] += abs(amount)
-            total_expense += abs(amount)
-
-    if total_income == 0 and total_expense == 0:
-        await update.message.reply_text(f"❗ Không có dữ liệu năm {year}")
-        return
-
-    msg = (
-        f"📊 BÁO CÁO THU–CHI NĂM {year}\n"
-        f"👤 User: @{target_user}\n\n"
-        f"💰 Tổng thu: {total_income:,} đ\n"
-        f"💸 Tổng chi: {total_expense:,} đ\n"
-        f"🧮 Còn lại: {total_income - total_expense:,} đ\n\n"
-        "📅 CHI TIẾT THEO THÁNG:\n"
-    )
-
-    max_expense = 0
-    max_month = None
-    best_month = None
-    best_balance = None
-
-    for m in range(1, 13):
-        inc = months[m]["income"]
-        exp = months[m]["expense"]
-
-        if inc == 0 and exp == 0:
-            continue
-
-        balance = inc - exp
-        msg += f"• Tháng {m:02d}: Thu {inc:,} | Chi {exp:,} | Còn {balance:,}\n"
-
-        if exp > max_expense:
-            max_expense = exp
-            max_month = m
-
-        if best_balance is None or balance > best_balance:
-            best_balance = balance
-            best_month = m
-
-    msg += "\n📌 ĐÁNH GIÁ:\n"
-    msg += "✅ Thu > Chi cả năm\n" if total_income >= total_expense else "⚠️ Chi > Thu cả năm\n"
-    if max_month:
-        msg += f"🔥 Tháng chi nhiều nhất: {max_month:02d}\n"
-    if best_month:
-        msg += f"💚 Tháng tiết kiệm tốt nhất: {best_month:02d}"
-
-    await update.message.reply_text(msg)
-
-# =====================
-# HANDLE MESSAGE
-# =====================
+# =========================
+# MESSAGE HANDLER (GHI THU / CHI)
+# =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+    user = update.message.from_user.username or "unknown"
 
-    if text == "📒 Hướng dẫn":
-        await help_cmd(update, context)
+    try:
+        parts = text.split(maxsplit=1)
+        amount = parse_amount(parts[0])
+        category = parts[1] if len(parts) > 1 else "KHÁC"
+
+        append_expense(date.today(), user, amount, category)
+
+        await update.message.reply_text(
+            f"✅ Ghi sổ thành công\n"
+            f"Số tiền: {amount:,} đ\n"
+            f"Loại: {category}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Lỗi nhập liệu\nVí dụ: 20K CF hoặc +1M LUONG",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+# =========================
+# SUMMARY DAY / MONTH
+# =========================
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Thiếu tham số. Ví dụ: /summary 20260101")
         return
 
-    if text == "📊 Tổng kết tháng":
-        context.args = [date.today().strftime("%Y%m")]
-        await summary(update, context)
+    key = context.args[0]
+    rows = get_all_rows()
+
+    income = expense = 0
+    for r in rows:
+        if r["date"].replace("-", "").startswith(key):
+            if r["amount"] >= 0:
+                income += r["amount"]
+            else:
+                expense += abs(r["amount"])
+
+    await update.message.reply_text(
+        f"📊 Tổng kết\n"
+        f"💰 Thu: {income:,} đ\n"
+        f"💸 Chi: {expense:,} đ\n"
+        f"📌 Còn lại: {income - expense:,} đ",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+# =========================
+# YEAR REPORT
+# =========================
+async def year_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Thiếu năm. Ví dụ: /year 2026")
         return
 
-    if text == "📊 Tổng kết ngày":
-        context.args = [date.today().strftime("%Y%m%d")]
-        await summary(update, context)
-        return
+    year = context.args[0]
+    rows = get_all_rows()
 
-    if text == "📊 Báo cáo năm":
-        context.args = [str(date.today().year)]
-        await year_report(update, context)
-        return
+    by_month = defaultdict(lambda: {"in": 0, "out": 0})
 
-    if text == "➕ Ghi thu":
-        await update.message.reply_text("+5M LƯƠNG\n+200K THƯỞNG")
-        return
+    for r in rows:
+        if r["date"].startswith(year):
+            m = r["date"][5:7]
+            if r["amount"] >= 0:
+                by_month[m]["in"] += r["amount"]
+            else:
+                by_month[m]["out"] += abs(r["amount"])
 
-    if text == "➖ Ghi chi":
-        await update.message.reply_text("20K CF\n1M ĂN")
-        return
+    text = f"📈 BÁO CÁO NĂM {year}\n\n"
+    total_in = total_out = 0
 
-    # ===== GHI SỔ =====
-    lines = [l for l in text.splitlines() if l.strip()]
-    success = 0
-    errors = []
+    for m in sorted(by_month):
+        i = by_month[m]["in"]
+        o = by_month[m]["out"]
+        total_in += i
+        total_out += o
+        text += f"• Tháng {m}: Thu {i:,} | Chi {o:,} | Còn {i-o:,}\n"
 
-    for line in lines:
-        try:
-            parts = line.split()
-            d, rest = parse_date_and_rest(parts)
-            amount = parse_amount(rest[0])
-            category = " ".join(rest[1:])
+    text += (
+        f"\n📌 TỔNG CỘNG\n"
+        f"💰 Thu: {total_in:,}\n"
+        f"💸 Chi: {total_out:,}\n"
+        f"📊 Còn: {total_in-total_out:,}"
+    )
 
-            append_expense(d, update.effective_user.username, amount, category)
-            success += 1
-        except Exception:
-            errors.append(line)
+    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
-    msg = f"✅ Ghi sổ thành công: {success} dòng"
-    if errors:
-        msg += "\n❌ Lỗi:\n" + "\n".join(errors)
+# =========================
+# REGISTER HANDLERS
+# =========================
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(CommandHandler("summary", summary))
+application.add_handler(CommandHandler("year", year_report))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await update.message.reply_text(msg)
-
-# =====================
-# MAIN
-# =====================
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("summary", summary))
-    app.add_handler(CommandHandler("year", year_report))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+# =========================
+# WEBHOOK ENDPOINT (BẮT BUỘC)
+# =========================
+@fastapi_app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
