@@ -23,7 +23,7 @@ from google_sheet_store import append_expense, get_all_rows
 # =========================
 # CONFIG
 # =========================
-OWNER_USERNAME = "ltkngan198"   # username Telegram (KHÔNG @)
+OWNER_USERNAME = "ltkngan198"  # username Telegram (KHÔNG @)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -42,26 +42,41 @@ MAIN_MENU = ReplyKeyboardMarkup(
 )
 
 # =========================
-# TELEGRAM APPLICATION
+# TELEGRAM APP
 # =========================
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # =========================
-# FASTAPI APP (BẮT BUỘC CÓ TÊN NÀY)
+# FASTAPI APP (Render chạy uvicorn bot:fastapi_app)
 # =========================
 fastapi_app = FastAPI()
 
-# =========================
-# FASTAPI LIFECYCLE (CHUẨN)
-# =========================
+
+@fastapi_app.get("/")
+async def root():
+    # Render health check
+    return {"ok": True}
+
+
 @fastapi_app.on_event("startup")
 async def on_startup():
+    # Khởi tạo PTB application (để process_update hoạt động)
     await application.initialize()
     await application.start()
+
 
 @fastapi_app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
+
+
+@fastapi_app.post("/webhook")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
+
 
 # =========================
 # /start
@@ -72,6 +87,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Chào bạn!\nChọn chức năng bên dưới ⬇️",
         reply_markup=MAIN_MENU
     )
+
 
 # =========================
 # /help
@@ -88,12 +104,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Tổng kết ngày (menu)\n"
         "• Tổng kết tháng (menu)\n"
         "• /year 2026\n"
-        "• /year 2026 @username\n\n"
+        "• /year 2026 @username (chỉ OWNER)\n\n"
         "ℹ️ Ghi chú:\n"
         "• K = nghìn | M = triệu\n"
         "• Thu: số dương | Chi: số âm\n",
         reply_markup=MAIN_MENU
     )
+
 
 # =========================
 # PARSE AMOUNT
@@ -110,6 +127,7 @@ def parse_amount(text: str) -> int:
     elif unit == "M":
         num *= 1_000_000
     return int(num)
+
 
 # =========================
 # PARSE LINES
@@ -128,60 +146,11 @@ def parse_lines(text: str):
 
         amount = parse_amount(content)
         category = re.sub(r"[+-]?\d+(\.\d+)?[KM]?", "", content, flags=re.I).strip()
+
         if amount != 0 and category:
             results.append((date, amount, category))
     return results
 
-# =========================
-# HANDLE TEXT (ghi thu/chi)
-# =========================
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if text in ["➕ Ghi thu", "➖ Ghi chi"]:
-        context.user_data["mode"] = "thu" if "thu" in text else "chi"
-        await update.message.reply_text(
-            f"✍️ Đang ghi {'THU' if context.user_data['mode']=='thu' else 'CHI'}\n"
-            "Nhập nội dung:"
-        )
-        return
-
-    if text in ["📊 Tổng kết ngày", "📅 Tổng kết tháng", "📈 Tổng kết năm"]:
-        if "năm" in text:
-            await update.message.reply_text("📌 Gõ: /year 2026")
-        elif "tháng" in text:
-            await summary_month(update, context)
-        else:
-            await summary_day(update, context)
-        return
-
-    if text == "ℹ️ Help":
-        await help_cmd(update, context)
-        return
-
-    mode = context.user_data.get("mode")
-    if not mode:
-        return
-
-    entries = parse_lines(text)
-    if not entries:
-        await update.message.reply_text("❌ Sai định dạng.\nVí dụ: 20K CF | +1M LUONG")
-        return
-
-    count = 0
-    for date, amount, category in entries:
-        if mode == "chi" and amount > 0:
-            amount = -amount
-        append_expense(
-            date=str(date),
-            user=update.effective_user.username,
-            amount=amount,
-            category=category
-        )
-        count += 1
-
-    await update.message.reply_text(f"✅ Ghi thành công: {count} dòng")
-    context.user_data.clear()
 
 # =========================
 # SUMMARY DAY
@@ -189,6 +158,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.today().date()
     rows = get_all_rows()
+
     thu = chi = 0
     for r in rows:
         if r["date"] == str(today):
@@ -196,6 +166,7 @@ async def summary_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 thu += r["amount"]
             else:
                 chi += abs(r["amount"])
+
     await update.message.reply_text(
         f"📊 TỔNG KẾT NGÀY\n"
         f"💰 Thu: {thu:,}\n"
@@ -203,12 +174,14 @@ async def summary_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📉 Còn: {thu-chi:,}"
     )
 
+
 # =========================
 # SUMMARY MONTH
 # =========================
 async def summary_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.today()
     rows = get_all_rows()
+
     thu = chi = 0
     for r in rows:
         d = datetime.strptime(r["date"], "%Y-%m-%d")
@@ -217,12 +190,14 @@ async def summary_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 thu += r["amount"]
             else:
                 chi += abs(r["amount"])
+
     await update.message.reply_text(
         f"📅 TỔNG KẾT THÁNG\n"
         f"💰 Thu: {thu:,}\n"
         f"💸 Chi: {chi:,}\n"
         f"📉 Còn: {thu-chi:,}"
     )
+
 
 # =========================
 # /year YYYY [@user]
@@ -234,6 +209,7 @@ async def summary_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     year = int(args[0])
+
     if len(args) > 1 and update.effective_user.username == OWNER_USERNAME:
         target_user = args[1].replace("@", "")
     else:
@@ -281,19 +257,96 @@ async def summary_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💚 Tháng tiết kiệm tốt nhất: {best:02d}"
     )
 
+
+# =========================
+# HANDLE TEXT (FIX: command không bị nuốt + menu chạy)
+# =========================
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    # ✅ FIX: nếu user gõ "/year 2026" mà vì lý do nào đó không vào CommandHandler,
+    # ta vẫn xử lý ở đây (fallback)
+    if text.startswith("/year"):
+        parts = text.split()
+        context.args = parts[1:]  # giả lập args như command
+        await summary_year(update, context)
+        context.user_data.clear()
+        return
+
+    if text.startswith("/help"):
+        await help_cmd(update, context)
+        context.user_data.clear()
+        return
+
+    if text.startswith("/start"):
+        await start(update, context)
+        return
+
+    # Menu
+    if text == "ℹ️ Help":
+        await help_cmd(update, context)
+        context.user_data.clear()
+        return
+
+    if text == "📊 Tổng kết ngày":
+        context.user_data.clear()
+        await summary_day(update, context)
+        return
+
+    if text == "📅 Tổng kết tháng":
+        context.user_data.clear()
+        await summary_month(update, context)
+        return
+
+    if text == "📈 Tổng kết năm":
+        context.user_data.clear()
+        await update.message.reply_text("📌 Gõ: /year 2026")
+        return
+
+    # Chọn mode thu/chi
+    if text in ["➕ Ghi thu", "➖ Ghi chi"]:
+        context.user_data["mode"] = "thu" if "thu" in text else "chi"
+        await update.message.reply_text(
+            f"✍️ Đang ghi {'THU' if context.user_data['mode']=='thu' else 'CHI'}\n"
+            "Nhập nội dung:"
+        )
+        return
+
+    # Nếu không chọn mode, vẫn cho bot nhắc nhẹ
+    mode = context.user_data.get("mode")
+    if not mode:
+        # không spam: chỉ nhắc khi người dùng gửi text kiểu nhập giao dịch
+        if parse_lines(text):
+            await update.message.reply_text("⚠️ Chọn ➕ Ghi thu hoặc ➖ Ghi chi trước (hoặc bấm /start).")
+        return
+
+    entries = parse_lines(text)
+    if not entries:
+        await update.message.reply_text("❌ Sai định dạng.\nVí dụ: 20K CF | +1M LUONG")
+        return
+
+    count = 0
+    for date, amount, category in entries:
+        if mode == "chi" and amount > 0:
+            amount = -amount
+
+        append_expense(
+            date=str(date),
+            user=update.effective_user.username,
+            amount=amount,
+            category=category
+        )
+        count += 1
+
+    await update.message.reply_text(f"✅ Ghi thành công: {count} dòng")
+    context.user_data.clear()
+
+
 # =========================
 # REGISTER HANDLERS
 # =========================
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
 application.add_handler(CommandHandler("year", summary_year))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# =========================
-# WEBHOOK ENDPOINT
-# =========================
-@fastapi_app.post("/webhook")
-async def telegram_webhook(req: Request):
-    update = Update.de_json(await req.json(), application.bot)
-    await application.process_update(update)
-    return {"ok": True}
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
