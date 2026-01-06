@@ -3,6 +3,8 @@ import re
 from datetime import datetime
 from collections import defaultdict
 
+from fastapi import FastAPI, Request
+
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -24,6 +26,9 @@ from google_sheet_store import append_expense, get_all_rows
 OWNER_USERNAME = "ltkngan198"   # username Telegram (KHÔNG @)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
+if not BOT_TOKEN:
+    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
+
 # =========================
 # MENU
 # =========================
@@ -35,6 +40,28 @@ MAIN_MENU = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+# =========================
+# TELEGRAM APPLICATION
+# =========================
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# =========================
+# FASTAPI APP (BẮT BUỘC CÓ TÊN NÀY)
+# =========================
+fastapi_app = FastAPI()
+
+# =========================
+# FASTAPI LIFECYCLE (CHUẨN)
+# =========================
+@fastapi_app.on_event("startup")
+async def on_startup():
+    await application.initialize()
+    await application.start()
+
+@fastapi_app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
 
 # =========================
 # /start
@@ -207,7 +234,6 @@ async def summary_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     year = int(args[0])
-    target_user = None
     if len(args) > 1 and update.effective_user.username == OWNER_USERNAME:
         target_user = args[1].replace("@", "")
     else:
@@ -256,22 +282,18 @@ async def summary_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# MAIN
+# REGISTER HANDLERS
 # =========================
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(CommandHandler("year", summary_year))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("year", summary_year))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=8000,
-        webhook_url=os.getenv("RENDER_EXTERNAL_URL") + "/webhook"
-    )
-
-if __name__ == "__main__":
-    main()
+# =========================
+# WEBHOOK ENDPOINT
+# =========================
+@fastapi_app.post("/webhook")
+async def telegram_webhook(req: Request):
+    update = Update.de_json(await req.json(), application.bot)
+    await application.process_update(update)
+    return {"ok": True}
