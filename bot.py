@@ -1,4 +1,3 @@
-# bot.py
 import os
 import re
 import json
@@ -22,6 +21,7 @@ from telegram.ext import (
     filters,
 )
 
+# Đảm bảo file google_sheet_store.py nằm cùng thư mục
 from google_sheet_store import append_expense, get_all_rows
 
 # =========================
@@ -383,7 +383,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Special quick commands in plain text (optional)
-    # Allow: "day 20260101" or "month 202601"
     m_day = re.fullmatch(r"(?i)(day|ngay)\s+(\d{8})", text)
     if m_day:
         await summary_day(update, context, m_day.group(2))
@@ -401,8 +400,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ Sai định dạng.\n\n"
             "✅ Ví dụ đúng:\n"
-            "• 500K SPA   (mặc định CHI)\n"
-            "• +4M LUONG  (THU)\n"
+            "• 500K SPA    (mặc định CHI)\n"
+            "• +4M LUONG   (THU)\n"
             "• 20260104 500K SPA\n"
             "• -20K CF\n",
             reply_markup=MAIN_MENU
@@ -415,8 +414,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for d, amount, category in entries:
         try:
-            # IMPORTANT: call append_expense POSITIONALLY to match google_sheet_store.py
-            append_expense(str(d), username, int(amount), category)
+            # ================================================================
+            # ✅ ĐÃ FIX LỖI 1 + LỖI 2:
+            # - Truyền 'd' (datetime.date) trực tiếp, KHÔNG dùng str(d)
+            # - Dùng positional arguments cho đúng hàm bên google_sheet_store
+            # ================================================================
+            append_expense(d, username, int(amount), category)
             ok += 1
         except Exception as e:
             errors += 1
@@ -435,10 +438,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Vui lòng xem Logs Render để biết chi tiết.",
             reply_markup=MAIN_MENU
         )
-
-    # Do NOT force user to choose mode again; keep it if they selected
-    # If you want auto-clear mode after success, uncomment:
-    # context.user_data.clear()
 
 # =========================
 # BUILD TELEGRAM APPLICATION
