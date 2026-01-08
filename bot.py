@@ -1,3 +1,4 @@
+# bot.py
 import os
 import re
 import json
@@ -104,7 +105,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # PARSE AMOUNT + SIGN
 # =========================
-_AMOUNT_RE = re.compile(r"(?i)\b([+-]?)\s*(\d+(?:\.\d+)?)\s*([KM]?)\b")
+# FIX: Thay đổi Regex để bắt được dấu + ở đầu dòng (?:^|\s)
+_AMOUNT_RE = re.compile(r"(?i)(?:^|\s)([+-]?)\s*(\d+(?:\.\d+)?)\s*([KM]?)\b")
 
 def _parse_amount_with_sign(text: str) -> Tuple[int, Optional[str]]:
     """
@@ -131,6 +133,7 @@ def _parse_amount_with_sign(text: str) -> Tuple[int, Optional[str]]:
 
 def _strip_amount(text: str) -> str:
     """Remove the first amount token from text to get category."""
+    # count=1 chỉ xóa 1 lần match đầu tiên
     return _AMOUNT_RE.sub("", text, count=1).strip()
 
 # =========================
@@ -141,35 +144,39 @@ _DATE_PREFIX_RE = re.compile(r"^(\d{8})\s+(.*)$")
 def parse_lines(text: str, fallback_mode: Optional[str]) -> List[Tuple[date, int, str]]:
     """
     Each line => (date, signed_amount, category)
-    Rules:
-      - If amount has '+' => THU (positive)
-      - If amount has '-' => CHI (negative)
-      - If no sign:
-          - if fallback_mode == 'thu' => positive
-          - elif fallback_mode == 'chi' => negative
-          - else => default CHI (negative)
     """
     results: List[Tuple[date, int, str]] = []
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
 
     for line in lines:
+        # 1. Parse Date
         m = _DATE_PREFIX_RE.match(line)
         if m:
-            d = datetime.strptime(m.group(1), "%Y%m%d").date()
+            try:
+                d = datetime.strptime(m.group(1), "%Y%m%d").date()
+            except ValueError:
+                d = datetime.today().date() # Fallback if invalid date string
             content = m.group(2).strip()
         else:
             d = datetime.today().date()
             content = line
 
+        # 2. Parse Amount
         abs_amt, sign = _parse_amount_with_sign(content)
         if abs_amt == 0:
             continue
 
+        # 3. Parse Category
         category = _strip_amount(content)
+        
+        # FIX: Xóa các ký tự đặc biệt ở đầu để tránh lỗi #NAME? trong Excel
+        # Ví dụ: nếu còn sót "+ LUONG" -> thành "LUONG"
+        category = category.lstrip("+-= ").strip()
+
         if not category:
             continue
 
-        # Decide final sign
+        # 4. Decide final sign
         if sign == "+":
             amount = abs_amt
         elif sign == "-":
@@ -382,7 +389,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_cmd(update, context)
         return
 
-    # Special quick commands in plain text (optional)
+    # Special quick commands
     m_day = re.fullmatch(r"(?i)(day|ngay)\s+(\d{8})", text)
     if m_day:
         await summary_day(update, context, m_day.group(2))
@@ -414,11 +421,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for d, amount, category in entries:
         try:
-            # ================================================================
-            # ✅ ĐÃ FIX LỖI 1 + LỖI 2:
-            # - Truyền 'd' (datetime.date) trực tiếp, KHÔNG dùng str(d)
-            # - Dùng positional arguments cho đúng hàm bên google_sheet_store
-            # ================================================================
+            # FIX: Gọi đúng tham số date object
             append_expense(d, username, int(amount), category)
             ok += 1
         except Exception as e:
@@ -466,12 +469,10 @@ async def health():
 
 @fastapi_app.on_event("startup")
 async def on_startup():
-    # Start PTB app
     await application.initialize()
     await application.start()
     logger.info("Application started")
 
-    # Set webhook (only if Render external url available)
     if WEBHOOK_URL:
         await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
         logger.info("Webhook set to %s", WEBHOOK_URL)
